@@ -1,0 +1,13 @@
+{
+  "subnets": [
+    "100.100.56.0/22",
+    "100.100.60.0/24"
+  ],
+  "credentials": [
+    { "username": "admin", "password": "CHANGE_ME" },
+    { "username": "lab", "password": "CHANGE_ME" }
+  ],
+  "auth_key": "tskey-auth-REPLACE_ME",
+  "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...REPLACE_ME user@host",
+  "re_search_delay_sec": 600
+}
