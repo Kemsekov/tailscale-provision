@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# provision_tailscale.sh — config-driven Tailscale fleet provisioner
+# provision_tailscale.sh — config-driven Tailscale & Wake-on-LAN fleet provisioner
 #
 # Reads config.json (subnets, credentials, auth_key, ssh_public_key,
 # re_search_delay_sec). For every host that is SSH-able with one of the
@@ -8,6 +8,7 @@
 #   2. joins the tailnet with auth_key
 #   3. enables tailscaled at boot (persistent)
 #   4. ensures ssh_public_key is in authorized_keys (admin/lab/vlad/student)
+#   5. installs ethtool, enables Wake-on-LAN, and configures its daemon
 #
 # If re_search_delay_sec > 0 the whole process repeats forever, sleeping that
 # many seconds between passes. If 0, it runs exactly once.
@@ -73,6 +74,51 @@ if ! sudo_run timeout 90 tailscale up --auth-key='__AUTH_KEY__' 2>/tmp/ts_up.err
         log "tailscale up error:"; tail -2 /tmp/ts_up.err
     fi
 fi
+
+# === WAKE-ON-LAN INJECTION ===
+log "configuring wake-on-lan"
+if ! command -v ethtool >/dev/null 2>&1; then
+    log "installing ethtool"
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo_run apt-get update >/dev/null 2>&1 && sudo_run apt-get install -y ethtool >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo_run dnf install -y ethtool >/dev/null 2>&1
+    fi
+fi
+
+# Dynamically find the primary Ethernet interface (ignores loopback, virtual bridges, tailscale, zerotier, hamachi, etc.)
+WOL_INTF=$(ip -br link | grep -E -v '^(lo|ts|tailscale|docker|br-|veth|wl|zt|ham)' | head -n 1 | awk '{print $1}')
+
+if [ -n "$WOL_INTF" ] && command -v ethtool >/dev/null 2>&1; then
+    # Test if hardware supports WOL
+    if sudo_run ethtool "$WOL_INTF" 2>/dev/null | grep -q "Supports Wake-on:.*g"; then
+        log "enabling WOL on $WOL_INTF"
+        sudo_run ethtool -s "$WOL_INTF" wol g >/dev/null 2>&1
+
+        # Create persistent systemd unit file
+        sudo_run sh -c "cat << 'EOF' > /etc/systemd/system/wol.service
+[Unit]
+Description=Enable Wake-on-LAN on $WOL_INTF
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -s $WOL_INTF wol g
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+
+        sudo_run systemctl daemon-reload >/dev/null 2>&1
+        sudo_run systemctl enable --now wol.service >/dev/null 2>&1
+        log "WOL daemon persistent state: $(systemctl is-enabled wol.service 2>/dev/null)"
+    else
+        log "WOL not supported by interface $WOL_INTF or disabled in BIOS"
+    fi
+else
+    log "failed to find valid Ethernet interface or ethtool is missing"
+fi
+# =============================
 
 for user in $(id -un) admin lab vlad student; do
     h=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
